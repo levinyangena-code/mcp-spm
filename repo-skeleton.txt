@@ -1,44 +1,89 @@
-# Repo skeleton
+# MCP-SPM repository skeleton
 
-This directory tree establishes the planned code structure for the M0 implementation and future milestones.
+The planned project structure follows the CLI-first Python modular monolith. This is a layout specification, not a claim that the listed features are implemented.
 
 ```text
 .
-├── CLAUDE.md
 ├── README.md
+├── LICENSE
+├── CONTRIBUTING.md
+├── SECURITY.md
+├── CHANGELOG.md
+├── CLAUDE.md
+├── pyproject.toml
+├── uv.lock
+├── .gitignore
+├── .env.example
+├── src/
+│   └── mcp_spm/
+│       ├── __init__.py
+│       ├── main.py
+│       ├── cli/
+│       │   ├── __init__.py
+│       │   └── commands.py
+│       ├── core/
+│       │   ├── engine.py
+│       │   ├── config.py
+│       │   ├── pipeline.py
+│       │   └── exceptions.py
+│       ├── discovery/
+│       │   ├── scanner.py
+│       │   ├── inventory.py
+│       │   └── transports.py
+│       ├── assessment/
+│       │   ├── engine.py
+│       │   ├── rules.py
+│       │   ├── registry.py
+│       │   └── checks/
+│       │       ├── authentication.py
+│       │       ├── permissions.py
+│       │       ├── secrets.py
+│       │       ├── tools.py
+│       │       ├── schemas.py
+│       │       └── transport.py
+│       ├── analysis/
+│       │   ├── fingerprint.py
+│       │   ├── behaviour.py
+│       │   └── risk.py
+│       ├── monitoring/
+│       │   ├── scheduler.py
+│       │   ├── change_detector.py
+│       │   └── alerts.py
+│       ├── storage/
+│       │   ├── database.py
+│       │   ├── models.py
+│       │   └── repositories.py
+│       ├── reporting/
+│       │   ├── json_report.py
+│       │   ├── html_report.py
+│       │   └── markdown_report.py
+│       └── api/
+│           ├── app.py
+│           └── routes/
+├── rules/
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   ├── security/
+│   └── fixtures/
+├── fixtures/
+│   ├── configurations/
+│   └── labs/                 # loopback-only, visibly labeled vulnerable test services
 ├── docs/
 │   ├── ARCHITECTURE.md
+│   ├── THREAT_MODEL.md
 │   ├── RULE_SPEC.md
-│   └── THREAT_MODEL.md
-├── mcpspm/
-│   ├── __init__.py
-│   ├── api/
-│   │   └── .gitkeep
-│   ├── analysis/
-│   │   └── .gitkeep
-│   ├── cli/
-│   │   └── .gitkeep
-│   ├── core/
-│   │   └── .gitkeep
-│   ├── discovery/
-│   │   └── .gitkeep
-│   ├── drift/
-│   │   └── .gitkeep
-│   ├── provenance/
-│   │   └── .gitkeep
-│   └── proxy/
-│       └── .gitkeep
-├── rules/
-│   └── .gitkeep
-├── fixtures/
-│   └── .gitkeep
-├── tests/
-│   └── .gitkeep
-├── ui/
-│   └── .gitkeep
-├── action/
-│   └── .gitkeep
-└── .gitignore
+│   ├── installation.md
+│   ├── usage.md
+│   └── roadmap.md
+├── examples/
+│   ├── configurations/
+│   └── sample-reports/
+└── .github/
+    ├── ISSUE_TEMPLATE/
+    └── workflows/
+        ├── tests.yml
+        └── security.yml
 ```
 
-Only the repository skeleton and documentation are introduced in M0. No application logic or feature code is included.
+The implementation roadmap begins with package/CLI foundation and proceeds through discovery, assessment, risk and persistence, reporting, monitoring/API, and hardening. Dashboard work is later-term. Dynamic assessment is opt-in and sandboxed. M0 adds documentation and structural planning only; it does not implement these modules.

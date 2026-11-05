@@ -1,161 +1,99 @@
 # MCP-SPM Threat Model
 
-This document summarizes the M0 threat model for MCP-SPM. The scanner and the policy proxy are both in scope because both are security-critical components.
+MCP-SPM is defensive assessment software that ingests potentially malicious configurations, MCP metadata, source code, and network responses. Its scanner, storage, reporting pipeline, and future API are security-sensitive attack surfaces. This M0 document describes risks and required design controls; it does not claim they are implemented.
+
+## Scope and security objectives
+
+Protect the host running MCP-SPM, target systems, credentials, assessment integrity, historical results, and report consumers. Preserve explicit authorization boundaries, prevent untrusted input from causing code execution or network access, and produce evidence that is useful without leaking secrets. Static assessment is the default; active assessment requires explicit authorization; isolated dynamic assessment is opt-in and sandboxed.
 
 ## Assets
-- MCP server inventory and its historical snapshots.
-- Approved and drifted tool definitions, schemas, and scopes.
-- Process and configuration metadata for local and remote hosts.
-- Provenance and trust information for packages and publishers.
-- Audit logs and approval records.
-- Generated findings and SARIF exports.
-- Policy definitions used by the optional proxy.
+- MCP server/configuration inventory and historical tool definition fingerprints.
+- User credentials, environment variables, tokens, local paths, and configuration data.
+- Assessment scope and target allowlist.
+- Rule definitions, scanner binaries/dependencies, findings, evidence, and reports.
+- SQLite/PostgreSQL database, migrations, audit/history records, and trusted baselines.
+- Future API identities, authorization policy, and scheduling configuration.
 
 ## Trust boundaries
-
-1. User host and local configuration files.
-2. Local client config and process metadata.
-3. Containerized or remote MCP servers.
-4. Package registries and provenance providers.
-5. The scanner itself, including document parsers and AST analyzers.
-6. The policy proxy and its enforcement decisions.
-7. Storage and database layer.
-8. API and UI surfaces that read or write posture metadata.
+1. User-provided config files, manifests, source trees, and command arguments.
+2. Local host files, processes, and MCP stdio servers.
+3. Networked MCP servers and their protocol responses.
+4. Package registries, publisher identities, and provenance services.
+5. Rule files, plugins, parsers, and the assessment engine.
+6. Optional LLM/classifier services, if explicitly introduced.
+7. Local database and report outputs.
+8. Future REST API and dashboard clients.
+9. Disposable dynamic-assessment sandbox and its host/container runtime.
 
 ## STRIDE analysis
 
 ### Spoofing
-Threats:
-- package or publisher typosquatting
-- server metadata impersonation
-- malicious configuration pointing to a rogue endpoint
-- false claims of approval or provenance
+**Threats:** a lookalike server or package, spoofed publisher metadata, DNS rebinding, configuration pointing to an unauthorized endpoint, or an untrusted fingerprint being presented as an approved baseline.
 
-Mitigations:
-- provenance checks with registry identity verification
-- hash-chained snapshots and immutable approval records
-- strict allowlisting for remote target scanning
-- explicit approval by human reviewers
+**Controls:** require explicit remote target allowlisting; bind authorization to the resolved destination and revalidate after DNS changes and redirects; record provenance and source of observations; distinguish observed fingerprints from human-trusted baselines; authenticate future API clients.
 
 ### Tampering
-Threats:
-- tool description or schema changes after approval
-- modified YAML rules or scanner output
-- policy mutation without a new approval
-- audit log rewriting
+**Threats:** malicious changes to tool descriptions or schemas, config/rule mutation, modified historical records, manipulated scan output, or unauthorized changes to API policy and remediation status.
 
-Mitigations:
-- canonical JSON snapshots with SHA-256 hashing
-- chain hashes linking each snapshot to the previous one
-- append-only audit log semantics
-- read-only or signed storage patterns for approvals and findings
+**Controls:** deterministic versioned canonicalization; SHA-256 fingerprints and historical comparison; transactional database writes; schema migrations; least-privilege storage; record scanner/rule versions; human review of changes. A content hash detects changed content but does not authenticate its publisher. Hash chaining alone does not prevent an administrator who controls the database and backups from rewriting history.
 
 ### Repudiation
-Threats:
-- claim that a server was approved when it was not
-- claim that a finding was suppressed or remediated without evidence
-- false attribution of policy decisions
+**Threats:** disputes over whether an assessment ran, which scope it used, who approved a baseline, or why a finding changed status.
 
-Mitigations:
-- actor and timestamp on every approval, policy change, and audit event
-- signed or at least tamper-visible records in the storage layer
-- reproducible scan metadata including scanner version and rule set version
+**Controls:** record scan mode, scope, tool/rule versions, timestamps, result status, and human reviewer identity where available. Keep finding instance IDs separate from rule IDs. Preserve enough sanitized evidence to reproduce decisions without retaining secrets. Never represent a failed or skipped scan as successful.
 
 ### Information disclosure
-Threats:
-- secrets kept in logs or snapshots
-- leaked environment values or credentials from config discovery
-- schema or tool descriptions exposing internal paths or tokens
-- privileged errors from proxy enforcement surfacing internal data
+**Threats:** secrets in configs, process arguments, protocol responses, evidence, logs, database fields, reports, or HTML; local filesystem paths and private tool descriptions exposed through API/report access.
 
-Mitigations:
-- redact secrets at ingestion and in SARIF output
-- avoid storing raw secrets or environment values by default
-- default to least-privilege access and log sanitization
-- restrict dashboard/API access to authorized operators
+**Controls:** redact at ingestion and before persistence; do not retain raw environment values by default; bound and truncate evidence; escape untrusted HTML; restrict report/database permissions; avoid logging request bodies and credentials; authenticate and authorize future API access. Redaction failures should prevent persistence or export of the affected value.
 
 ### Denial of service
-Threats:
-- malicious or oversized schema payloads
-- pathologically nested or recursive ASTs
-- hostile tool descriptions that trigger expensive parsing or embeddings
-- slow or hanging network probes to non-allowlisted endpoints
+**Threats:** huge or deeply nested schemas, slow/hanging servers, decompression or parser bombs, excessive tool lists, pathological source files, regex backtracking, unbounded concurrency, or expensive scoring/report rendering.
 
-Mitigations:
-- resource limits and timeouts for all server connections
-- size and depth limits for parsed schemas and text inputs
-- concurrency caps and fail-fast behavior
-- banned network egress for scanning containers unless explicitly enabled
+**Controls:** timeouts and cancellation; request/response and file size caps; schema/text depth and item-count limits; bounded concurrency; safe YAML/JSON parsing; regex safeguards; per-stage CPU/memory/time budgets; graceful partial-failure reporting. Dynamic assessment also has container resource limits.
 
 ### Elevation of privilege
-Threats:
-- the scanner runs commands or reads local files beyond the intended scope
-- the proxy bypasses allowlists or approval status
-- an attacker manipulates policy generation from a drifted snapshot
-- a user with dashboard access gains dangerous control over enforcement
+**Threats:** executing a launch command from discovered config, arbitrary code execution through dynamic testing or a parser/plugin, SSRF reaching privileged services, unsafe file path handling, proxying beyond policy, or an API user acquiring scan/approval privileges.
 
-Mitigations:
-- no automatic execution of untrusted server code on the host
-- run detection and source analysis in isolated containers with restricted capabilities
-- fail closed in `enforce` mode when policy or approval state is unknown
-- separate approval permissions from fleet read permissions
-- enforce least privilege for CLI and API plans
+**Controls:** do not execute commands by default; make active stdio launches explicit and validated; run untrusted code only in disposable containers with no network by default, read-only filesystem, dropped capabilities, and strict limits; protect filesystem access against traversal and symlink escapes; validate and revalidate network scope, including redirects and resolved IP addresses; use least privilege and role separation for future API operations. Dynamic assessment never runs on the host.
 
 ## Scanner as an attack target
 
-The scanner is a primary security boundary and therefore an attack target. The tool must assume that all inputs are adversarial.
+Assume every external byte is adversarial: MCP descriptions, schema fields, annotations, resources, prompts, protocol messages, configuration files, manifests, source archives, package metadata, registry responses, rule fixtures, and optional model output.
 
-### High-risk inputs
-- tool descriptions
-- schema descriptions and defaults
-- package metadata and lockfiles
-- discovered config YAML or JSON
-- code and manifest text extracted from untrusted repositories
-- optional LLM outputs used to triage or summarize findings
+Required design controls:
+- Keep untrusted text in data channels, not instruction channels. If optional LLM triage is added, use fixed instructions, quoted hostile content, schema-constrained output, and no authority to call tools, change severity autonomously, or approve baselines.
+- Parse safely with strict limits and no unsafe object deserialization or evaluation.
+- Use safe path handling for all file discovery and report generation; prevent traversal and symlink escape.
+- Keep network off for static analysis and sandbox execution by default. Active network requests require explicit allowlisting and SSRF controls.
+- Prevent arbitrary shell/process execution by default; discovered command strings remain inert data.
+- Redact before logs, evidence, snapshots, and reports; test redaction with secret fixtures.
+- Escape all untrusted content in HTML and terminal output.
+- Validate rule schemas and fixture references before loading rules; plugins require explicit trust and version compatibility.
+- Ensure regex and AST analyzers have time/resource bounds and cannot load scanned code.
 
-### Attack patterns to harden against
-- prompt injection via instructions hidden in tool metadata
-- Unicode re-encoding tricks to hide malicious text
-- path traversal in local file discovery or rule processing
-- parser bombs or malicious YAML that trigger deep recursion or CPU exhaustion
-- remote registry poisoning or malicious package metadata
-- secrets being exfiltrated through logs or snapshots
+## Assessment-mode-specific rules
 
-### Required controls
-- treat all tool text as hostile input
-- restrict scanner execution to a sandbox with no host network by default
-- never feed raw server metadata into an LLM instruction channel
-- normalize and inspect text for invisible characters before scanning
-- bound parsing, file size, and recursion depth
-- log only redacted evidence and truncated text snippets
-- reject or quarantine rules that cannot be validated against fixtures
+- **Static:** no MCP server launch or network connection; safe to run on recorded fixtures and parsed configuration.
+- **Active:** explicit user action and scope validation; remote hosts must be allowlisted. Apply timeouts, response limits, redirect/DNS/IP checks, and no secret-bearing logs. Local stdio servers must not be misclassified as HTTP auth failures.
+- **Isolated dynamic:** disabled by default. Require disposable isolation with no host execution, no network by default, read-only filesystem, dropped capabilities, and CPU/memory/time limits. Abort if required isolation cannot be guaranteed.
 
-## Threat assumptions
-- Attackers may control or influence MCP server metadata or descriptions.
-- Attackers may attempt to weaponize natural-language instructions embedded in schemas.
-- Attackers may coerce users into connecting to networked endpoints without explicit allowlisting.
-- Attackers may distribute typosquatted packages or republish benign tools with malicious metadata.
-- Components storing posture data may be targeted for tampering.
-
-## Security design principles
-- Defensive tooling only; no automation that turns untrusted input into execution.
-- Zero trust between discovery data and trusted approval state.
-- Explicit allowlisting before remote scanning.
-- Human approval required for any state transition to approved.
-- Fail closed on drift, malformed input, or missing provenance evidence.
-- Redaction first; evidence is useful only when it does not leak secrets.
-
-## M0 residual risks
-- Package provenance may be incomplete or weak unless registry support is available.
-- Semantic classification can be useful but cannot replace deterministic checks.
-- Hash-chained snapshots protect against tampering in the storage layer but do not replace backup integrity controls.
-- The policy proxy can fail closed but still depends on the correct model of the approved snapshot.
+## Residual risks
+- Static analysis can miss behavior that is not represented in available source or metadata; absence of findings is not proof of safety.
+- Fingerprints prove equality of canonicalized observed definitions only, not benign behavior, publisher identity, or authenticity.
+- Risk scoring is a prioritization aid; contextual MCP scores must be transparent and must not be mislabeled as CVSS.
+- Registry and provenance evidence may be incomplete or unavailable.
+- Hashes and local history are not tamper-proof against an attacker controlling the host, database, and backups.
+- Sandboxing depends on correct configuration and the security of the container runtime and host kernel.
+- Active assessment may affect target availability even with strict limits; authorization and scope must be confirmed.
 
 ## M0 security acceptance criteria
-For the initial implementation boundary, the project should satisfy these conditions:
-- no automatic execution of untrusted server code on host systems
-- no secrets in logs or snapshots
-- remote scanning requires explicit allowlisting
-- approval state is human-only
-- policy enforcement blocks drifted or unknown definitions in enforce mode
-- the scanner itself is isolated from privileged host resources by default
+The design and later implementation must ensure:
+- Static mode makes no network requests and launches no server processes.
+- Active remote assessment requires explicit allowlisting and SSRF-resistant validation.
+- Local stdio is assessed with transport-appropriate checks, not HTTP-only assumptions.
+- Dynamic testing is disabled by default and isolated from the host.
+- Secrets are redacted before logs, storage, evidence, or reports.
+- Hostile text and protocol responses cannot trigger execution, tool calls, or approvals.
+- Findings and fingerprints are auditable and clearly distinguish observation from trust.
+- No feature, scan result, test coverage, or security guarantee is represented as implemented until verified.

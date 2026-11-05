@@ -1,316 +1,143 @@
 # MCP-SPM Architecture
 
-This document defines the M0 architecture for MCP-SPM. It intentionally describes the system boundary and component layout without implementing feature logic.
+This M0 architecture describes a CLI-first defensive security posture manager implemented as a Python modular monolith. It specifies boundaries and data flow, not completed functionality.
 
-## Goals
-- Discover and inventory MCP servers, their transport methods, and security posture.
-- Scan tool metadata, schemas, source code, and runtime config using threat-aware rules.
-- Detect drift and provenance changes after server approval.
-- Offer an optional policy proxy that enforces allowed tools and constrained arguments.
-- Present a single self-hosted operational view for fleet and per-server posture.
+## Goals and operating modes
+- Discover MCP server assets from user-supplied configuration and authorized local sources.
+- Assess MCP configuration, server metadata, tool capabilities, and source evidence using modular rules.
+- Fingerprint canonical tool definitions and compare them with trusted historical observations.
+- Persist findings and assessment history in SQLite initially, with PostgreSQL supported behind the storage layer.
+- Produce evidence-based remediation guidance and JSON, HTML, Markdown, and SARIF reports.
+- Add continuous monitoring and a REST API after the CLI foundation; a dashboard is a later objective.
 
-## High-level system context
+Assessment modes:
+1. **Static** (default): parse configuration and recorded metadata without starting or connecting to an MCP server.
+2. **Active**: connect to an explicitly authorized server to inspect protocol capabilities. Remote targets require an entry in `config/targets.allow.yaml`; default allowlist is empty. Local stdio is not an HTTP endpoint and must not be reported as failing HTTP authentication checks.
+3. **Isolated dynamic**: opt-in controlled testing in a disposable sandbox. Never execute untrusted server code on the host. Sandbox requirements include no network by default, read-only filesystem, dropped capabilities, resource limits, and explicit network authorization where needed.
+
+## High-level architecture
 
 ```mermaid
 flowchart LR
   subgraph Inputs
-    Config[Client configs\nClaude Desktop, Code, Cursor, VS Code, Windsurf]
-    Proc[Local processes\ncontainers\nKubernetes]
-    Hosts[Allowlisted hosts]
-    Sources[Source repos / package metadata]
+    Config[User MCP configuration]
+    Local[Authorized local sources]
+    Allow[Explicit target allowlist]
+    Recorded[Recorded metadata and source fixtures]
   end
 
-  subgraph Core
-    DC[Discovery adapters]
-    INV[Normalized inventory]
-    AST[Static analysis + rule engine]
-    SNAP[Snapshot + approval service]
-    DIFF[Drift semantic diff]
-    PROV[Provenance verifier]
-    POL[Policy compiler]
-    PRX[Proxy / enforcement layer]
-    API[FastAPI API]
-    DB[(SQLite / Postgres)]
+  subgraph ModularMonolith[Python modular monolith]
+    CLI[Typer CLI]
+    Validate[Config and scope validation]
+    Discovery[Discovery and MCP adapters]
+    Normalize[Normalization and redaction]
+    Assess[Rule registry and assessment engine]
+    Analyze[Capabilities, risk, and SHA-256 fingerprints]
+    Monitor[Historical comparison and change detection]
+    Storage[Repositories and transactions]
+    DB[(SQLite initially / PostgreSQL supported)]
+    Report[JSON / HTML / Markdown / SARIF]
+    API[FastAPI, later phase]
   end
 
-  subgraph Output
-    SARIF[SARIF + findings]
-    DASH[Dashboard + CLI]
-    CI[CI / GitHub Action]
-  end
-
-  Config --> DC
-  Proc --> DC
-  Hosts --> DC
-  Sources --> AST
-  DC --> INV
-  INV --> AST
-  INV --> SNAP
-  INV --> PROV
-  AST --> SARIF
-  SNAP --> DIFF
-  PROV --> SNAP
-  SNAP --> POL
-  POL --> PRX
-  DIFF --> API
-  API --> DB
-  AST --> DB
-  SNAP --> DB
-  PRX --> DB
-  API --> DASH
-  SARIF --> CI
+  Config --> CLI --> Validate
+  Allow --> Validate
+  Local --> Validate
+  Recorded --> Normalize
+  Validate --> Discovery
+  Discovery --> Normalize
+  Normalize --> Assess
+  Normalize --> Analyze
+  Assess --> Storage
+  Analyze --> Storage
+  Monitor --> Storage
+  Storage --> DB
+  Assess --> Report
+  Analyze --> Report
+  Storage --> Report
+  API --> Storage
 ```
 
-## Component map
+## Component responsibilities
 
-### 1. Discovery
-Responsible for enumerating candidate MCP servers and collecting inventory data.
+### CLI and core pipeline
+The CLI is the initial user interface and orchestrates a typed pipeline: load input, validate configuration and scope, normalize/redact, discover only when authorized, assess, calculate contextual risk, persist, and report. Validation errors must stop execution before any network request or process launch. Commands and options must clearly identify which mode can connect or execute.
 
-Scope:
-- Client config parsing from Claude Desktop, Claude Code, Cursor, VS Code, Windsurf.
-- Runtime process discovery and container inspection.
-- Compose and Kubernetes manifest analysis.
-- Transport detection: stdio, SSE, streamable HTTP.
-- Tool, prompt, and resource enumeration where allowed.
+### Discovery and inventory
+Discovery adapters parse supported MCP configuration formats and, in later approved phases, connect through supported transports using the official MCP SDK. The inventory represents servers, transport, endpoint/launch metadata, authentication observations, tools, resources, prompts, schemas, and source provenance. Parsing and normalization are bounded and non-executing; discovered launch commands are data, never automatically invoked.
 
-Security rules:
-- Discovery does not execute code automatically.
-- External hosts are not scanned without explicit allowlisting.
-- Observed endpoint details are normalized as untrusted data.
+### Assessment and rule registry
+Rules are modular, typed, uniquely identified, and loaded from the project rule catalog. Initial rule families are exposed secrets, authentication controls, excessive permissions, command execution capability, suspicious descriptions, schema modifications, insecure transport, supply-chain risks, sensitive information exposure, and insufficient auditing. Rules return evidence, confidence, severity, exploitability, impact, exposure, and remediation. A transport-aware rule must distinguish stdio from network transports.
 
-### 2. Inventory model
-The inventory layer creates a canonical object model for each server and MCP artifact.
+Rule execution is deterministic by default. Tool-provided text remains untrusted throughout parsing, rule evaluation, reporting, and any optional triage. Parser and detector limits prevent adversarial inputs from consuming unbounded resources.
 
-Entities:
-- Server
-- ToolDefinition
-- ResourceDefinition
-- PromptDefinition
-- Observation
-- Snapshot
-- ApprovalRecord
-- Finding
-- PolicyDefinition
+### Capability analysis and fingerprinting
+Capability analysis summarizes filesystem, network, process/command, and other declared or detected operations. Canonicalization must be deterministic and versioned. SHA-256 fingerprints identify exact canonical tool definitions for comparison; they do not prove package publisher identity or benign behavior. Historical changes are shown with their provenance and require human review before trust is restored.
 
-Key fields:
-- Server id, name, host, port, transport, auth state, launch metadata.
-- Tool metadata: name, description, input schema, scopes, tags, version.
-- Artifact hashes and canonical JSON representations.
-- Observation timestamps and source adapter metadata.
+### Risk scoring
+Each finding records severity, exploitability, impact, exposure, confidence, and remediation. CVSS is included when an applicable vulnerability can be responsibly mapped; contextual MCP risks use a transparent, versioned project model and must not be mislabeled as CVSS. Store the inputs and rationale so scores can be reproduced. Aggregate posture scores must not hide underlying findings or imply certainty.
 
-### 3. Static analysis and rule engine
-Runs rules against tool metadata, source files, and generated schemas.
+### Storage and persistence
+SQLAlchemy models and repositories isolate domain code from SQLite/PostgreSQL details. Use Alembic for schema migrations and transactions for related scan, finding, evidence, and fingerprint writes. Persist secrets neither as raw fields nor as unredacted evidence. Store unique finding-instance IDs separately from rule IDs. Database access is local by default; API authorization is required before exposing it over a network.
 
-Inputs:
-- YAML rules in `rules/`
-- AST data from Python, TypeScript, and Go source using tree-sitter.
-- Structured schema objects extracted from tool definitions.
-- Optional provider- or classifier-based semantic review.
+### Monitoring
+Recurring assessments, new-server detection, configuration monitoring, alerts, and remediation status are later-phase services. Scheduling must reuse the same authorization and scope validation as manual scans. A change detector compares historical fingerprints and assessments; it cannot approve changes.
 
-Outputs:
-- Findings with canonical semantics and mappings.
-- SARIF 2.1.0 output.
-- Scores for each server and aggregated fleet posture.
+### Reporting
+Report serializers consume validated domain results and produce JSON, HTML, Markdown, and SARIF. HTML output must escape untrusted descriptions and evidence. All formats apply secret redaction, evidence truncation, and stable finding identifiers. Reports distinguish observed facts from inferred risk and include limitations.
 
-Important constraints:
-- Tool descriptions and schema text are hostile input and handled as quoted data.
-- LLM triage is optional and never allowed to trigger approvals or tool execution.
-- Rules are deterministic first; semantic-only conclusions are advisory.
+### REST API and later dashboard
+FastAPI is a later phase, after the CLI and domain interfaces stabilize. It should call the same application services as the CLI, validate requests with Pydantic, authenticate API users, enforce authorization, and avoid exposing secrets. The web dashboard is explicitly later than the initial CLI/API milestones.
 
-### 4. Drift and approval service
-Stores canonical snapshots of tool metadata, schemas, and server state; records approval decisions.
+## Data model
 
-State machine concept:
-- `unknown` -> `observed` -> `approved` -> `drifted` -> `reapproved`.
-- Any post-approval mutation in description, schema, version, or trust profile moves the server to `drifted`.
-- Only a human can re-approve a drifted server.
+Logical entities (physical SQLAlchemy table names are lower snake case):
 
-### 5. Provenance and trust
-Verifies package identity and trust metadata for server artifacts and their dependencies.
+- **Server** (`servers`): stable asset ID, display name, transport, redacted endpoint/launch metadata, source, exposure/auth observations, and timestamps.
+- **Scan** (`scans`): unique scan ID, server/config scope, mode, tool/rule versions, status, timestamps, and summary. Never record a scan as completed if it failed or was not run.
+- **Tool** (`tools`): server ID, tool name, sanitized description, canonical schema, annotations/capability summary, canonicalization version, and SHA-256 fingerprint. Resources and prompts may be represented as typed inventory artifacts or additional tables, subject to migrations.
+- **Finding** (`findings`): unique finding-instance ID, rule ID, scan ID, optional server/tool IDs, severity, confidence, risk inputs, remediation, status, and stable deduplication fingerprint.
+- **Evidence** (`evidence`): finding ID, location, redacted and bounded evidence, evidence type, and source reference. Raw secrets are never persisted.
+- **Fingerprint** (`fingerprints`): server/tool/config subject, canonical digest, algorithm and canonicalization version, observation time, and optional human-trusted baseline reference.
 
-Checks:
-- Publisher and maintainer identity.
-- Registry metadata and package signatures.
-- Sigstore or cosign attestations.
-- SLSA provenance.
-- Typosquat or ownership drift detection.
+Relationships: a server has scans and tools; a scan has findings; a finding has evidence; fingerprints are historical observations for a server, tool, or configuration. Rule IDs identify detection logic and are not finding primary keys. Database transactions must keep one scan's findings/evidence consistent.
 
-Result:
-- A trust score and provenance evidence chain attached to the server snapshot.
+## Plugin and extension interfaces
 
-### 6. Policy proxy
-Optional runtime enforcement layer between clients and MCP servers.
+Keep a modular monolith initially. Define narrow, typed interfaces for discovery adapters, assessment rules, and report exporters. Each extension declares an identifier, supported input/schema version, and metadata; it receives normalized, redacted domain objects. Loading an extension must not execute a discovered MCP server. Plugin API versioning and trust policy are implementation decisions for the foundation phase; untrusted third-party plugins must not be loaded implicitly.
 
-Modes:
-- `monitor`: log and report without blocking.
-- `dry-run`: evaluate policy decisions without enforcement.
-- `enforce`: block unknown tools, malformed messages, drifted definitions, or disallowed network paths.
+## Security boundaries and failure behavior
 
-The proxy should use the last approved snapshot to build a policy model; it must fail closed when state is unknown.
+- Parse input without executing it; reject unsupported or ambiguous config structures safely.
+- Validate remote target authorization and resolved network addresses before active requests. Defend against SSRF, DNS rebinding, redirects to unauthorized destinations, and private/link-local/metadata addresses unless explicitly authorized by policy.
+- Apply connection/read timeouts, response-size limits, bounded concurrency, and schema/text depth limits.
+- Do not follow redirects or resolve a hostname to a new address without re-validating scope.
+- Do not invoke arbitrary commands by default; stdio connection launch requires explicit user intent and safe, validated launch configuration.
+- Static assessment remains available without network access.
+- Isolated dynamic mode is disabled by default and must reject environments that do not meet sandbox requirements.
+- On malformed or oversized responses, stop safely and report an assessment error rather than interpreting partial content as trusted.
 
-### 7. API and dashboard
-A self-hosted API and UI for fleet posture, approvals, drift timeline, and policy review.
+## Repository layout
 
-Responsibilities:
-- Display server posture and trust score.
-- Show findings by severity and due to drift or provenance.
-- Provide approval workflow and audit trail.
-- Offer policy editing with YAML-first schema definitions.
-
-### 8. Plugin architecture
-MCP-SPM should use entry points and narrow interfaces instead of hardwired modules.
-
-Supported plugin types:
-- `mcpspm.rules` — detection rules and rule metadata.
-- `mcpspm.discoverers` — discovery adapters.
-- `mcpspm.exporters` — SARIF or other report exporters.
-
-Plugin contract:
-- Each plugin is deterministic, typed, and isolated from runtime execution.
-- Plugins receive canonical inventory objects, never raw hostile text directly without sanitization.
-- Plugins must declare schema version and metadata to support compatibility checks.
-
-## Storage model
-
-The initial storage strategy is SQLite with an option to move to PostgreSQL. Use a domain-oriented schema with immutable records where appropriate.
-
-```sql
--- server inventory
-servers (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  transport TEXT NOT NULL,
-  host TEXT,
-  port INTEGER,
-  auth_state TEXT,
-  endpoint TEXT,
-  launch_metadata JSON,
-  posture_score INTEGER,
-  approval_state TEXT,
-  created_at TIMESTAMP,
-  updated_at TIMESTAMP
-);
-
--- normalized artifacts
-artifacts (
-  id TEXT PRIMARY KEY,
-  server_id TEXT NOT NULL,
-  kind TEXT NOT NULL, -- tool, resource, prompt, config, package
-  name TEXT NOT NULL,
-  description TEXT,
-  schema JSON,
-  version TEXT,
-  content_hash TEXT NOT NULL,
-  canonical_json TEXT NOT NULL,
-  created_at TIMESTAMP
-);
-
--- historical snapshots
-snapshots (
-  id TEXT PRIMARY KEY,
-  server_id TEXT NOT NULL,
-  parent_snapshot_id TEXT,
-  asset_hash TEXT NOT NULL,
-  canonical_json TEXT NOT NULL,
-  chain_hash TEXT NOT NULL,
-  created_at TIMESTAMP,
-  approved_by TEXT,
-  approved_at TIMESTAMP
-);
-
--- findings
-findings (
-  id TEXT PRIMARY KEY,
-  server_id TEXT NOT NULL,
-  rule_id TEXT NOT NULL,
-  severity TEXT NOT NULL,
-  confidence TEXT NOT NULL,
-  tool TEXT,
-  location TEXT,
-  evidence TEXT,
-  mappings JSON,
-  remediation TEXT,
-  fingerprint TEXT,
-  created_at TIMESTAMP
-);
-
--- provenance
-provenance (
-  id TEXT PRIMARY KEY,
-  server_id TEXT NOT NULL,
-  package_name TEXT,
-  publisher TEXT,
-  registry TEXT,
-  signature_valid BOOLEAN,
-  slsa_valid BOOLEAN,
-  typosquat_risk BOOLEAN,
-  trust_score INTEGER,
-  evidence JSON,
-  created_at TIMESTAMP
-);
-
--- approvals and policy
-approvals (
-  id TEXT PRIMARY KEY,
-  server_id TEXT NOT NULL,
-  snapshot_id TEXT NOT NULL,
-  approver TEXT NOT NULL,
-  reason TEXT,
-  decision TEXT NOT NULL,
-  created_at TIMESTAMP
-);
-
-policies (
-  id TEXT PRIMARY KEY,
-  server_id TEXT NOT NULL,
-  version TEXT NOT NULL,
-  mode TEXT NOT NULL,
-  rules JSON NOT NULL,
-  created_at TIMESTAMP
-);
-
--- audit log
-audit_events (
-  id TEXT PRIMARY KEY,
-  actor TEXT,
-  target TEXT,
-  action TEXT NOT NULL,
-  result TEXT NOT NULL,
-  details JSON,
-  created_at TIMESTAMP
-);
+```text
+.
+├── src/mcp_spm/
+│   ├── cli/                 # Typer entry points and commands
+│   ├── core/                # Settings, pipeline, errors, domain orchestration
+│   ├── discovery/           # Config parsing, inventory, MCP transports
+│   ├── assessment/          # Engine, rule contracts, registry, checks
+│   ├── analysis/            # Behavior, canonicalization, fingerprints, risk
+│   ├── monitoring/          # Scheduling, change detection, alerts (later)
+│   ├── storage/             # SQLAlchemy models, migrations integration, repositories
+│   ├── reporting/           # JSON, HTML, Markdown, SARIF exporters
+│   └── api/                 # FastAPI app and routes (later)
+├── rules/
+├── tests/{unit,integration,security,fixtures}/
+├── docs/
+├── examples/{configurations,sample-reports}/
+└── .github/{ISSUE_TEMPLATE,workflows}/
 ```
 
-## Data flow and boundaries
+## Delivery boundary
 
-1. Discovery adapters collect metadata from installed clients, manifests, running processes, and allowlisted endpoints.
-2. Normalization turns those sources into a common inventory format.
-3. Analysis engines evaluate tool metadata, code, and server config for threats.
-4. Snapshots are created from normalized inventory after successful indexing or scanning.
-5. The approval service marks snapshots as reviewed and trusted.
-6. Drift detection compares current state to the last approved snapshot.
-7. The policy proxy derives enforcement rules from the approved snapshot.
-8. Audit events record all enforcement and approval actions.
-
-## M0 scope boundary
-
-M0 includes:
-- architecture and component design
-- threat model and STRIDE analysis
-- data model and plugin API specification
-- repo skeleton required for upcoming milestones
-
-M0 excludes:
-- business logic implementations
-- rule execution engines
-- transport clients and collectors
-- policy enforcement logic
-- dashboard and API runtime code
-
-## Open technical decisions
-
-The following are intentionally left open for later milestone scoping:
-- exact choice of SQLAlchemy model organization for discovery vs. analysis vs. drift
-- whether to store all canonical JSON and hash chain fields in the same table or split them by domain
-- whether the policy proxy should be a sidecar service or integrated into the API process
-- exact location of rule loaders and plugin registries within the Python package
+M0 is architecture, data model, threat model, and repository skeleton documentation only. It does not claim that discovery, scanning, persistence, reports, monitoring, or API features are implemented. The staged product roadmap is foundation/CLI, discovery, detection, risk and persistence, reporting, monitoring/API, then hardening/release; detailed scope and gates should be maintained in the roadmap documentation.
