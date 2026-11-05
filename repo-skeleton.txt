@@ -1,0 +1,44 @@
+# Repo skeleton
+
+This directory tree establishes the planned code structure for the M0 implementation and future milestones.
+
+```text
+.
+├── CLAUDE.md
+├── README.md
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── RULE_SPEC.md
+│   └── THREAT_MODEL.md
+├── mcpspm/
+│   ├── __init__.py
+│   ├── api/
+│   │   └── .gitkeep
+│   ├── analysis/
+│   │   └── .gitkeep
+│   ├── cli/
+│   │   └── .gitkeep
+│   ├── core/
+│   │   └── .gitkeep
+│   ├── discovery/
+│   │   └── .gitkeep
+│   ├── drift/
+│   │   └── .gitkeep
+│   ├── provenance/
+│   │   └── .gitkeep
+│   └── proxy/
+│       └── .gitkeep
+├── rules/
+│   └── .gitkeep
+├── fixtures/
+│   └── .gitkeep
+├── tests/
+│   └── .gitkeep
+├── ui/
+│   └── .gitkeep
+├── action/
+│   └── .gitkeep
+└── .gitignore
+```
+
+Only the repository skeleton and documentation are introduced in M0. No application logic or feature code is included.
